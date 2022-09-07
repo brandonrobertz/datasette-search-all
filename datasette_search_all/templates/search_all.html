@@ -25,6 +25,51 @@
         transform: rotate(360deg);
     }
 }
+form label {
+  width: 100%;
+}
+
+.checkboxes label {
+  font-weight: unset;
+}
+
+div.checkboxes {
+  display: flex;
+  flex-flow: row nowrap;
+  justify-content: center;
+  max-height: 50vh;
+  min-height: 500px;
+  overflow-y: scroll;
+}
+
+.checkboxes .group {
+}
+
+.checkboxes .group-items {
+  display: flex;
+  flex-flow: column wrap;
+}
+
+.checkboxes .group-name {
+  font-weight: bold;
+}
+.checkboxes .group-item {
+  margin-left: 15px;
+}
+
+.search-methods {
+  display: flex;
+  flex-flow: row wrap;
+  justify-content: space-around;
+  align-items: center;
+}
+
+#bulk-search-file {
+  padding: 20px;
+}
+.bulk-search {
+  max-width: 45%;
+}
 </style>
 {% endblock %}
 
@@ -41,13 +86,79 @@
 {% if not searchable_tables %}
     <p>There are no tables that have been configured for search.</p>
 {% else %}
+    <p>
+    This tool enables full-text search across all the tables across all the databases in the system. You can use simple plain-text queries (default), or run <a target="_blank" href="https://docs.datasette.io/en/stable/full_text_search.html#advanced-sqlite-search-queries">"advanced queries"</a> which let you use special keywords like "AND" and "OR" in your searches. If you notice that a column isn't being searched, you can enable it for search by going to the table, clicking the gear icon next to the table name and going to the "Configure FTS" page. The columns with check marks will be searchable. Send any feature requests, notes or problems to <a href="mailto:brandon@bxroberts.org">Brandon Roberts</a>.
+    </p>
+    <p>
+    Full-text search across all databases can be a resource intensive operation, so if you notice the system is really lagging out it could be overloaded. Let me know and I'll address the issue, but also try to tread somewhat lightly! 😇
+    </p>
+    {% if q %}
+    <p style="font-weight: bold">NOTE: Refreshing this page will re-run the search if you have one loaded!</p>
+    {% endif %}
+
     <form action="{{ urls.path("/-/search") }}" method="get">
         <p>
-            <input type="search" name="q" value="{{ q }}" id="search-all-q">
-            <input type="submit" value="Search">
+            <input type="search" name="q" value="{{ q }}" id="search-all-q" />
+            <br/>
+            <label for="search-all-raw">
+              <input type="checkbox" name="raw" {% if raw == "on" %}checked="on"{% endif %} id="search-all-raw" />
+              Enable <a target="_blank" href="https://docs.datasette.io/en/stable/full_text_search.html#advanced-sqlite-search-queries">advanced queries</a>
+            </label>
+            {% if labeled_cols %}
+              <div class="checkboxes">
+                {% for group, columns in labeled_cols.items() %}
+                <div class="group">
+                  <label>
+                    <input id="group-{{ group }}" class="group-name" type="checkbox" name="{{ group }}" value="{{ group }}" /> {{ group }}
+                    <script>
+                      document.querySelector("#group-{{ group }}").addEventListener("click", (e) => {
+                        document.querySelectorAll(".item-{{ group }}").forEach((chk) => {
+                          chk.checked = document.querySelector("#group-{{ group }}").checked;
+                        });
+                      });
+                    </script>
+                  </label>
+                  <div class="group-items">
+                    {% for column in labeled_cols[group] %}
+                      <label>
+                        <input class="group-item item-{{ group }}" type="checkbox" name="{{ group }}[]" value="{{ column }}" /> {{ column }}
+                      </label>
+                    {% endfor %}
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+
+            <div class="search-methods">
+                <p class="individual-search">
+                    <input type="submit" value="Search" />
+                </p>
+                {% if not q %}
+                <p class="bulk-search">
+                    Or upload a CSV with queries in the first column. The first row (headers) will be skipped. Once complete, a results CSV download will be prompted.<br/>
+                    <input type="file" id="bulk-search-file" accept=".csv" /><br/>
+                    <input type="submit" id="bulk-search-submit" value="Bulk search" />
+                </p>
+                {% endif %}
+            </div>
+
+        </p>
+        <p>
+            <select name="db" id="dbs">
+                <option value="">Search All Databases</option>
+                {% for db_name in searchable_dbs %}
+                <option value="{{ db_name }}" {% if db_name == db %}selected{% endif %}>{{ db_name }}</option>
+                {% endfor %}
+            </select>
         </p>
     </form>
 {% endif %}
+
+{% if q and searchable_tables %}
+<button id="download_results">Download Results CSV</button>
+{% endif%}
+
 <div id="search-all-results" style="margin-top: 1em;">
 {% if q and searchable_tables %}
     <ul>
@@ -59,8 +170,11 @@
 </div>
 <div id="search-all-no-results"></div>
 
-<script>
-var NUM_RESULTS = 5;
+<script src="https://unpkg.com/papaparse@5.3.2/papaparse.min.js"></script>
+<script src="https://unpkg.com/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+
+<script type="module">
+var NUM_RESULTS = 25;
 var searchable_tables = {{ searchable_tables_json|safe }};
 var q = document.getElementById("search-all-q");
 var search_results = document.getElementById("search-all-results");
@@ -162,19 +276,232 @@ function displayResults(data, base_url) {
     }
 }
 
-if (q.value) {
-    searchable_tables.forEach(item => {
-        var base_url = item.url;
-        var li = document.querySelector(`[data-searchable-url="${base_url}"]`);
-        li.classList.add('search-all-loading');
-        var json_url = `${item.url_json}?_shape=objects&_labels=on&_size=${NUM_RESULTS}&_search=${encodeURIComponent(q.value)}`;
-        fetch(json_url).then(r => r.json()).then((data) => {
-            li.style.display = 'none';
-            displayResults(data, base_url);
-        });
-    });
+async function do_search(query) {
+  console.log("Running search for query:", query);
+  for (const item of searchable_tables) {
+    var base_url = item.url;
+    var li = document.querySelector(`[data-searchable-url="${base_url}"]`);
+    li.classList.add('search-all-loading');
+    var json_url = `${item.url_json}?_shape=objects&_labels=on&_size=${NUM_RESULTS}&_search=${encodeURIComponent(query)}{% if raw == "on" %}&_searchmode=raw{% endif %}`;
+    console.log("Executing query:", json_url);
+    const r = await fetch(json_url);
+    li.style.display = 'none';
+    const results_data = await r.json();
+    console.log("Got results:", results_data.rows.length);
+    displayResults(results_data, base_url);
+  }
 }
-</script>
 
+// automatic single search
+if (q.value) {
+    await do_search(q.value);
+}
+
+/*******************************************
+ * BEGIN BULK SEARCH FUNCTIONALITY         *
+ *******************************************/
+
+/**
+ * Get all table results. This is an intermediate table, to be
+ * flattened into a single spreadsheet for quick analysis.
+ *
+ * [{
+ *   db: "Database Name",
+ *   table: "Table Name",
+ *   n_results: "10 results"
+ *   results_link: "https://link/to/results"
+ *   results: [{key: value, ...}, ...]
+ * }, ...]
+ */
+function structured_results() {
+  const table_results = [];
+  // for each result block
+  document.querySelectorAll("#search-all-results > div").forEach((table) => {
+    const [db_name, table_name] = table.querySelector("h2")
+        .textContent
+        .split(" in ")[1]
+        .split(": ");
+    const n_results = table.querySelector("h2 > a").textContent;
+    const results_link = table.querySelector("h2 > a").href;
+    const rows = table.querySelectorAll("table tbody tr");
+    const headers = [];
+    const data = [];
+    // for each row, first is header
+    rows.forEach((tr, r_ix) => {
+      if (r_ix === 0) {
+        tr.querySelectorAll("th").forEach((th) => {
+          headers.push(th.textContent);
+        });
+      } else {
+        const record = {};
+        tr.querySelectorAll("td").forEach((td, t_ix) => {
+          const key = headers[t_ix];
+          record[key] = td.textContent;
+        });
+        data.push(record);
+      }
+    });
+    table_results.push({
+      db: db_name,
+      table: table_name,
+      n_results: n_results,
+      results_link: results_link,
+      headers: headers,
+      results: data,
+    });
+  });
+  return table_results;
+}
+
+/**
+ * Take a multi-dimensional array and ensure that
+ * all inner rows have the same length. This makes
+ * it so we can turn it into a CSV easily. NOTE: This
+ * doesn't return anything, it mutates the passed
+ * array.
+ */
+function square_md_array(all_rows) {
+  const maxlen = Math.max(...all_rows.map((row) => row.length));
+  // pad all rows so they're that long
+  all_rows.forEach((row) => {
+    const diff = maxlen - row.length;
+    for (let i = 0; i < diff; i++) row.push("");
+  });
+}
+
+/**
+ * Convert structured results to an array of arrays format
+ * which we can then turn into a CSV using Papa Parse.
+ */
+function results_csv() {
+  const table_results = structured_results();
+  const query = document.querySelector("#search-all-q").value;
+  const all_rows = [
+    // Overall aggregate info
+    ["Search query:", query],
+    ["Tables with search hits:", table_results.length],
+    // Basically a new line/separator
+    [],
+  ];
+
+  table_results.forEach((result) => {
+    const table_info_rows = [
+        ["DB:", result.db],
+        ["Table:", result.table],
+        ["Results:", result.n_results],
+        ["Results URL:", result.results_link],
+        [],
+    ];
+    const table_data_rows = [
+      result.headers,
+    ];
+    result.results.forEach((r) => {
+        table_data_rows.push(Object.values(r));
+    });
+    table_data_rows.push([]);
+
+    // add to overall rows
+    table_info_rows.forEach((r) => {
+      all_rows.push(r);
+    });
+    table_data_rows.forEach((r) => {
+      all_rows.push(r);
+    });
+  });
+
+  // do a pass to find the longest row
+  square_md_array(all_rows);
+
+  return all_rows;
+}
+
+function download_results(e) {
+  if (e) e.preventDefault();
+  const data = results_csv();
+  const csv = Papa.unparse(data, {
+    header: false
+  });
+  var blob = new Blob([csv], {type: "text/csv;charset=utf-8"});
+  saveAs(blob, "results.csv");
+}
+
+function prepare_search(query) {
+  // set the query
+  console.log("Setting query");
+  document.querySelector("#search-all-q").value = query;
+
+  var wrapper = document.getElementById("search-all-results");
+  console.log("Deleting previous search results");
+  // clear out the list if it exists
+  wrapper.querySelectorAll("*").forEach((el) => {
+    el.remove();
+  });
+  var ul = document.createElement("ul");
+
+  // prepare the list of tables to search w/ search params
+  // NOTE: This mirrors the actual HTML above
+  console.log("Building table queries");
+  searchable_tables.forEach((searchable_table) => {
+    var li = document.createElement("li");
+    li.setAttribute("data-searchable-url", searchable_table.url);
+
+    var a = document.createElement("a");
+    var e_query = encodeURIComponent(query);
+    a.setAttribute("href", `${searchable_table.url}?_search=${e_query}`);
+    a.textContent = `Search ${ searchable_table.database }: ${ searchable_table.table } for "${ q }"`;
+
+    li.appendChild(a);
+    ul.appendChild(li);
+  });
+
+  wrapper.appendChild(ul);
+}
+
+async function do_bulk_search(e) {
+  e.preventDefault();
+  // Bump up the results for bulk search, we really want everything
+  // but we'll start here for now
+  NUM_RESULTS = 200;
+
+  let csv_rows = [];
+
+  var file = document.querySelector("#bulk-search-file").files[0];
+  if (!file) return;
+
+  const file_text = await file.text();
+  const csv_parsed = Papa.parse(file_text, {
+    // makes csv_parsed.data a 2d array
+    header: false,
+    skipEmptyLines: true,
+  });
+  const queries = csv_parsed.data.map((row, index) => {
+    // skip header row
+    if (index === 0) return;
+    // use first column
+    return row[0].replace(/[,\.:;]+/g, "");
+  }).filter(x=>x);
+
+  for(const query of queries) {
+    prepare_search(query);
+    await do_search(query);
+    csv_rows = csv_rows.concat(results_csv());
+  }
+
+  square_md_array(csv_rows)
+  console.log("CSV rows:", csv_rows);
+  const csv = Papa.unparse(csv_rows, {
+    header: false
+  });
+  var blob = new Blob([csv], {type: "text/csv;charset=utf-8"});
+  saveAs(blob, "bulk-search-results.csv");
+}
+
+// if we don't have a query, the download button won't exist
+const download_btn = document.querySelector("#download_results");
+if (download_btn) download_btn.addEventListener("click", download_results);
+
+const bulk_search_btn = document.querySelector("#bulk-search-submit");
+if (bulk_search_btn) bulk_search_btn.addEventListener("click", do_bulk_search);
+</script>
 
 {% endblock %}
